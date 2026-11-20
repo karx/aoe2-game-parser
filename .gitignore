@@ -1,0 +1,6 @@
+venv/
+replays/
+vendor-aoc-mgz/
+__pycache__/
+*.pyc
+.sentry-native/

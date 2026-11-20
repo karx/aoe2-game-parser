@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hawkeye — Overview</title>
+<link rel="stylesheet" href="assets/common.css">
+<style>
+  #shell { grid-template-rows: 28px 1fr 18px; }
+  #wrap { overflow-y: auto; padding: 20px; max-width: 920px; }
+  .card { border: 1px solid var(--border); background: var(--card); padding: 10px 12px; margin-bottom: 12px; }
+  .big { font-size: 18px; letter-spacing: .06em; }
+  .vs { color: var(--dim); padding: 0 8px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .go { display: block; border: 1px solid var(--border); background: var(--card); padding: 10px 12px; }
+  .go:hover { border-color: var(--orange); }
+  .go b { color: var(--orange); letter-spacing: .1em; text-transform: uppercase; font-weight: 700; }
+  p { margin: 4px 0; }
+  @media (max-width: 640px) { .cols { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="shell">
+  <header id="top"></header>
+  <div id="wrap">
+    <div class="card" id="match"></div>
+    <div class="cols">
+      <a class="go" href="map.html"><b>▸ Map layers</b><p class="dim">Isometric / top-down map with a time scrubber. Buildings placed, order dots, order heat, kaaro's camera heat and trail, gather points.</p></a>
+      <a class="go" href="flows.html"><b>▸ Time flows</b><p class="dim">Age lanes, production per minute, cumulative queues, build rate, APM and army-order pressure, with candidate fight moments.</p></a>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <h2>What this can and can't show</h2>
+      <p>A recorded game stores <span class="val">player commands</span>, not game state. Everything here is rebuilt from those commands plus the starting header.</p>
+      <p class="dim">▸ Real: build placements, unit orders (target tiles + units selected), production queues, techs, age-ups (from chat), resign, the recorder's camera.</p>
+      <p class="dim">▸ Not available: resources, kills, unit positions, current population, the opponent's camera. "Pressure" is orders aimed at the enemy base, a proxy for fights rather than proof of one.</p>
+      <p class="dim">▸ Time is the replay's own sync clock (the in-game clock). Camera data is kaaro's only (the recorder).</p>
+    </div>
+  </div>
+  <footer id="status"></footer>
+</div>
+<script src="data/match.js"></script>
+<script src="assets/common.js"></script>
+<script>
+  const { M, PN, fmt, winner, tag } = K;
+  K.chrome('Overview');
+  const w = winner();
+  document.getElementById('match').innerHTML =
+    `<div class="big">${tag(1)}<span class="vs">vs</span>${tag(2)}</div>` +
+    `<div class="dim">${PN[1].civ} vs ${PN[2].civ} · ${M.map.name} · ${M.dim}×${M.dim} · pop ${M.pop} · speed ${M.speed.toFixed(2)}</div>` +
+    `<div style="margin-top:6px"><span class="lbl">duration</span> <span class="val">${fmt(M.duration)}</span> · <span class="lbl">result</span> <span class="val">${w ? K.pname(w) + ' wins (opponent resigned)' : 'unknown'}</span></div>` +
+    `<div class="dim" style="margin-top:4px">` + M.ages.slice().sort((a, b) => a.t - b.t).map(a => `${tag(a.p)} ${a.age} <span class="val">${fmt(a.t)}</span>`).join(' · ') + `</div>`;
+  K.boot(K.bootLines('overview'), () => K.status('select a view', M.file));
+</script>
+</body>
+</html>

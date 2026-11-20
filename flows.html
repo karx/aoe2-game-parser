@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hawkeye — Time Flows</title>
+<link rel="stylesheet" href="assets/common.css">
+<style>
+  #shell { grid-template-rows: 28px 1fr 18px; }
+  #main { display: grid; grid-template-columns: 1fr 320px; min-height: 0; }
+  #chartwrap { position: relative; overflow-y: auto; min-height: 0; }
+  #cv { display: block; width: 100%; }
+  .mom { display: grid; grid-template-columns: 64px 1fr auto; gap: 6px; white-space: nowrap; padding: 3px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .mom:hover { background: var(--card); }
+  .mom .t { color: var(--yellow); }
+  .link { font-size: 10px; }
+</style>
+</head>
+<body>
+<div id="shell">
+  <header id="top"></header>
+  <main id="main">
+    <div id="chartwrap"><canvas id="cv"></canvas></div>
+    <aside class="panel">
+      <section><h2>Totals</h2><div id="totals"></div></section>
+      <section><h2>At <span class="val" id="rdT">—</span> <span class="dim" id="pin"></span></h2><div id="readout" class="dim">move over the charts</div></section>
+      <section><h2>Candidate moments</h2><div id="moments"></div></section>
+      <section><h2>Keys</h2><div class="dim" style="font-size:10px"><kbd>click</kbd> pin cursor · <kbd>m</kbd> open pinned time on map · <kbd>esc</kbd> unpin</div></section>
+    </aside>
+  </main>
+  <footer id="status"></footer>
+</div>
+
+<script src="data/match.js"></script>
+<script src="assets/common.js"></script>
+<script>
+(() => {
+  const { M, COL, PCOL, PN, byP, fmt, upper, ageAt, OPP, ORDER_KINDS } = K;
+  K.chrome('Time Flows');
+  const D = M.duration, BIN = 60000, NB = Math.ceil(D / BIN), B30 = 30000, N30 = Math.ceil(D / B30);
+  const ZONE = 28;   // tiles: an order "toward the enemy" lands within this radius of the enemy start
+  const start = p => PN[p].start;
+
+  /* ---------- derive series ---------- */
+  const Z = () => new Float32Array(NB), Z3 = () => new Float32Array(N30);
+  const prod = { 1: { vil: Z(), mil: Z() }, 2: { vil: Z(), mil: Z() } };
+  const bld = { 1: { eco: Z(), mil: Z(), tech: Z() }, 2: { eco: Z(), mil: Z(), tech: Z() } };
+  const ord = { 1: Z3(), 2: Z3() }, prs = { 1: Z3(), 2: Z3() };
+  const tot = { 1: { vil: 0, army: 0, eco: 0, mil: 0, tech: 0, acts: 0, orders: 0 }, 2: { vil: 0, army: 0, eco: 0, mil: 0, tech: 0, acts: 0, orders: 0 } };
+  [1, 2].forEach(p => byP[p].forEach(e => {
+    const b = Math.min(NB - 1, Math.floor(e.t / BIN)), b3 = Math.min(N30 - 1, Math.floor(e.t / B30));
+    tot[p].acts++;
+    if (e.k === 'DE_QUEUE') { if (e.c === 'vil') { prod[p].vil[b] += e.n; tot[p].vil += e.n; } else if (e.c === 'mil') { prod[p].mil[b] += e.n; tot[p].army += e.n; } }
+    else if (e.k === 'BUILD') { const c = e.c === 'other' ? 'eco' : e.c; bld[p][c][b]++; tot[p][c]++; }
+    else if (ORDER_KINDS.has(e.k) && e.x !== undefined) {
+      const n = Math.min(e.n || 1, 40); ord[p][b3] += n; tot[p].orders += n;
+      const s = start(OPP(p)); if (Math.hypot(e.x - s[0], e.y - s[1]) <= ZONE) prs[p][b3] += n;
+    }
+  }));
+  // sampled series every 10s: rolling APM, cumulative villagers/army
+  const STEP = 10000, NS = Math.floor(D / STEP) + 1;
+  const apm = { 1: new Float32Array(NS), 2: new Float32Array(NS) };
+  const cum = { 1: { vil: new Float32Array(NS), army: new Float32Array(NS) }, 2: { vil: new Float32Array(NS), army: new Float32Array(NS) } };
+  [1, 2].forEach(p => {
+    const e = byP[p]; let vi = 0, ar = 0, idx = 0;
+    for (let i = 0; i < NS; i++) {
+      const t = i * STEP, hi = upper(e, t, 't'), lo = upper(e, t - 60000, 't');
+      apm[p][i] = hi - lo;
+      for (; idx < hi; idx++) { if (e[idx].k === 'DE_QUEUE') { if (e[idx].c === 'vil') vi += e[idx].n; else if (e[idx].c === 'mil') ar += e[idx].n; } }
+      cum[p].vil[i] = vi; cum[p].army[i] = ar;
+    }
+  });
+
+  // candidate moments: strongest 30s windows of army activity, separated by >= 150s
+  function moments() {
+    const sc = [];
+    for (let i = 0; i < N30; i++) sc.push({ i, t: i * B30, s: ord[1][i] + ord[2][i] + 2 * (prs[1][i] + prs[2][i]) });
+    const out = [];
+    sc.sort((a, b) => b.s - a.s).forEach(c => { if (c.s > 0 && out.length < 8 && out.every(o => Math.abs(o.t - c.t) >= 150000)) out.push(c); });
+    return out.sort((a, b) => a.t - b.t).map(c => {
+      const a = prs[1][c.i], b = prs[2][c.i];
+      let label;
+      if (a > 0 && b > 0) label = 'mutual pressure';
+      else if (a > b) label = `${PN[1].name} pushes in`;
+      else if (b > a) label = `${PN[2].name} pushes in`;
+      else label = ord[1][c.i] >= ord[2][c.i] ? `${PN[1].name} army activity` : `${PN[2].name} army activity`;
+      return { ...c, label, who: a > b ? 1 : b > a ? 2 : (ord[1][c.i] >= ord[2][c.i] ? 1 : 2) };
+    });
+  }
+  const MOM = moments();
+
+  /* ---------- canvas layout ---------- */
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+  const PADL = 84, PADR = 14, GAP = 24;
+  const SECS = [
+    { id: 'age', title: 'Age lanes', h: 78 },
+    { id: 'prod', title: 'Production / min   ▲ ' + PN[1].name + '   ▼ ' + PN[2].name + '   solid=army  dim=villagers', h: 170 },
+    { id: 'cum', title: 'Cumulative queued   solid=villagers  dashed=army', h: 130 },
+    { id: 'bld', title: 'Buildings placed / min   ▲ ' + PN[1].name + '   ▼ ' + PN[2].name + '   solid=military  dim=eco  line=tech', h: 130 },
+    { id: 'apm', title: 'Actions / min (rolling 60s)', h: 110 },
+    { id: 'army', title: 'Army orders / 30s   ▲ ' + PN[1].name + '   ▼ ' + PN[2].name + '   solid=toward enemy base  dim=all', h: 170 },
+  ];
+  let W = 0, H = 0, dpr = 1;
+  const S = { cur: null, pin: null };
+  const X = t => PADL + (t / D) * (W - PADL - PADR);
+  const T = x => Math.max(0, Math.min(D, ((x - PADL) / (W - PADL - PADR)) * D));
+  function tops() { let y = 22; return SECS.map(s => { const o = y; y += s.h + GAP; return o; }); }
+  function layout() {
+    dpr = window.devicePixelRatio || 1; W = document.getElementById('chartwrap').clientWidth;
+    H = tops()[SECS.length - 1] + SECS[SECS.length - 1].h + 34;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); cv.style.height = H + 'px'; draw();
+  }
+  const font = (px, w) => `${w || 400} ${px}px "IBM Plex Mono","Courier New",monospace`;
+  const niceMax = v => { if (v <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p; return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * p; };
+
+  function frameSec(s, top) {
+    ctx.strokeStyle = COL.border; ctx.lineWidth = 1; ctx.strokeRect(PADL + 0.5, top + 0.5, W - PADL - PADR, s.h);
+    ctx.fillStyle = COL.amber; ctx.font = font(10); ctx.textAlign = 'left'; ctx.fillText(s.title.toUpperCase(), PADL + 4, top - 6);
+    // vertical gridlines every 10 minutes
+    ctx.strokeStyle = COL.border;
+    for (let m = 10; m * 60000 < D; m += 10) { const x = Math.round(X(m * 60000)) + 0.5; ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + s.h); ctx.stroke(); }
+  }
+  function yAxis(top, h, max, mirrored) {
+    ctx.fillStyle = COL.dim; ctx.font = font(9); ctx.textAlign = 'right';
+    if (mirrored) { ctx.fillText(String(max), PADL - 5, top + 9); ctx.fillText('0', PADL - 5, top + h / 2 + 3); ctx.fillText(String(max), PADL - 5, top + h - 2); }
+    else { ctx.fillText(String(max), PADL - 5, top + 9); ctx.fillText('0', PADL - 5, top + h - 2); }
+  }
+  function barsMirror(top, h, series /* [{p, arr, binMs, alpha, stackOn?}] */, max, binMs) {
+    const mid = top + h / 2, half = h / 2 - 3, bw = Math.max(1, (X(binMs) - X(0)) - 1);
+    series.forEach(s => {
+      ctx.fillStyle = PCOL[s.p]; ctx.globalAlpha = s.alpha;
+      s.arr.forEach((v, i) => {
+        if (!v) return; const base = s.base ? s.base[i] : 0, a = (base / max) * half, b = ((base + v) / max) * half, x = X(i * binMs);
+        const y0 = s.p === 1 ? mid - a : mid + a, y1 = s.p === 1 ? mid - b : mid + b;
+        ctx.fillRect(x, Math.min(y0, y1), bw, Math.abs(y1 - y0));
+      });
+    }); ctx.globalAlpha = 1;
+    ctx.strokeStyle = COL.dim; ctx.beginPath(); ctx.moveTo(PADL, Math.round(mid) + 0.5); ctx.lineTo(W - PADR, Math.round(mid) + 0.5); ctx.stroke();
+  }
+  function line(top, h, arr, color, max, dash) {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.setLineDash(dash || []); ctx.beginPath();
+    arr.forEach((v, i) => { const x = X(i * STEP), y = top + h - 2 - (v / max) * (h - 6); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+
+  function drawAge(top) {
+    const s = SECS[0], laneH = 24;
+    [1, 2].forEach((p, li) => {
+      const y = top + 10 + li * (laneH + 8);
+      const pts = [{ t: 0, a: 'Dark' }].concat(M.ages.filter(a => a.p === p).sort((a, b) => a.t - b.t).map(a => ({ t: a.t, a: a.age })));
+      const alpha = { Dark: 0.14, Feudal: 0.3, Castle: 0.55, Imperial: 0.85 };
+      pts.forEach((c, i) => {
+        const t1 = i + 1 < pts.length ? pts[i + 1].t : D, x0 = X(c.t), x1 = X(t1);
+        ctx.fillStyle = PCOL[p]; ctx.globalAlpha = alpha[c.a]; ctx.fillRect(x0, y, x1 - x0 - 1, laneH); ctx.globalAlpha = 1;
+        ctx.fillStyle = c.a === 'Imperial' ? COL.bg : COL.text; ctx.font = font(10); ctx.textAlign = 'left';
+        ctx.fillText(`${c.a}${c.t ? ' ' + fmt(c.t) : ''}`, x0 + 4, y + 15);
+      });
+      ctx.fillStyle = PCOL[p]; ctx.font = font(10, 700); ctx.textAlign = 'right'; ctx.fillText(PN[p].name.slice(0, 10), PADL - 5, y + 15);
+      const r = K.resignOf(p); if (r) { ctx.fillStyle = COL.yellow; ctx.font = font(12, 700); ctx.textAlign = 'right'; ctx.fillText('× resigned ' + fmt(r.t), X(r.t) - 4, y + 15); }
+    });
+  }
+  function drawProd(top, h) {
+    const max = niceMax(Math.max(...prod[1].vil.map((v, i) => v + prod[1].mil[i]), ...prod[2].vil.map((v, i) => v + prod[2].mil[i])));
+    yAxis(top, h, max, true);
+    barsMirror(top, h, [
+      { p: 1, arr: prod[1].vil, alpha: 0.4 }, { p: 1, arr: prod[1].mil, alpha: 1, base: prod[1].vil },
+      { p: 2, arr: prod[2].vil, alpha: 0.4 }, { p: 2, arr: prod[2].mil, alpha: 1, base: prod[2].vil },
+    ], max, BIN);
+  }
+  function drawCum(top, h) {
+    const max = niceMax(Math.max(cum[1].vil.at(-1), cum[2].vil.at(-1), cum[1].army.at(-1), cum[2].army.at(-1)));
+    yAxis(top, h, max, false);
+    [1, 2].forEach(p => { line(top, h, cum[p].vil, PCOL[p], max); line(top, h, cum[p].army, PCOL[p], max, [4, 3]); });
+  }
+  function drawBld(top, h) {
+    const tt = p => bld[p].eco.map((v, i) => v + bld[p].mil[i] + bld[p].tech[i]);
+    const max = niceMax(Math.max(...tt(1), ...tt(2)));
+    yAxis(top, h, max, true);
+    barsMirror(top, h, [
+      { p: 1, arr: bld[1].eco, alpha: 0.35 }, { p: 1, arr: bld[1].mil, alpha: 1, base: bld[1].eco },
+      { p: 2, arr: bld[2].eco, alpha: 0.35 }, { p: 2, arr: bld[2].mil, alpha: 1, base: bld[2].eco },
+    ], max, BIN);
+    // tech/TC placements as small ticks on the baseline
+    [1, 2].forEach(p => { ctx.fillStyle = COL.yellow; byP[p].forEach(e => { if (e.k === 'BUILD' && e.c === 'tech') { const x = X(e.t), mid = top + h / 2, d = p === 1 ? -1 : 1; ctx.fillRect(x - 1, mid + d * (h / 2 - 7) - 2, 2, 4); } }); });
+  }
+  function drawApm(top, h) {
+    const max = niceMax(Math.max(...apm[1], ...apm[2])); yAxis(top, h, max, false);
+    [1, 2].forEach(p => line(top, h, apm[p], PCOL[p], max));
+  }
+  function drawArmy(top, h) {
+    const max = niceMax(Math.max(...ord[1], ...ord[2])); yAxis(top, h, max, true);
+    barsMirror(top, h, [{ p: 1, arr: ord[1], alpha: 0.35 }, { p: 1, arr: prs[1], alpha: 1 }, { p: 2, arr: ord[2], alpha: 0.35 }, { p: 2, arr: prs[2], alpha: 1 }], max, B30);
+    MOM.forEach((m, i) => { ctx.fillStyle = COL.yellow; ctx.font = font(9, 700); ctx.textAlign = 'center'; ctx.fillText(String.fromCharCode(65 + i), X(m.t + B30 / 2), top + h + 11); });
+  }
+
+  function draw() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+    const tp = tops(), fns = [drawAge, drawProd, drawCum, drawBld, drawApm, drawArmy];
+    SECS.forEach((s, i) => { frameSec(s, tp[i]); fns[i](tp[i], s.h); });
+    // time axis
+    const ya = tp[SECS.length - 1] + SECS[SECS.length - 1].h + 24;
+    ctx.fillStyle = COL.dim; ctx.font = font(9); ctx.textAlign = 'center';
+    for (let m = 0; m * 60000 <= D; m += 10) ctx.fillText(m + 'm', X(m * 60000), ya);
+    // cursor
+    const t = S.pin !== null ? S.pin : S.cur;
+    if (t !== null) {
+      const x = Math.round(X(t)) + 0.5; ctx.strokeStyle = COL.yellow; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x, 4); ctx.lineTo(x, ya - 14); ctx.stroke();
+      ctx.fillStyle = COL.yellow; ctx.font = font(10, 700); ctx.textAlign = x > W - 60 ? 'right' : 'left'; ctx.fillText(fmt(t), x + (x > W - 60 ? -4 : 4), 14);
+    }
+  }
+
+  /* ---------- panel ---------- */
+  function totals() {
+    const r = p => `<td class="r ${K.PCLS[p]}">`;
+    const rows = [['villagers queued', 'vil'], ['army queued', 'army'], ['eco bldgs', 'eco'], ['mil bldgs', 'mil'], ['tech bldgs', 'tech'], ['actions', 'acts'], ['units ordered', 'orders']];
+    document.getElementById('totals').innerHTML = `<table><tr><th></th><th class="r p1">${PN[1].name}</th><th class="r p2">${PN[2].name}</th></tr>` +
+      rows.map(([l, k]) => `<tr><td class="dim">${l}</td>${r(1)}${tot[1][k]}</td>${r(2)}${tot[2][k]}</td></tr>`).join('') +
+      `<tr><td class="dim">avg actions/min</td>${r(1)}${(tot[1].acts / (D / 60000)).toFixed(1)}</td>${r(2)}${(tot[2].acts / (D / 60000)).toFixed(1)}</td></tr></table>`;
+  }
+  function readout() {
+    const t = S.pin !== null ? S.pin : S.cur;
+    document.getElementById('rdT').textContent = t === null ? '—' : fmt(t);
+    document.getElementById('pin').textContent = S.pin !== null ? '[pinned]' : '';
+    if (t === null) return;
+    const b = Math.min(NB - 1, Math.floor(t / BIN)), b3 = Math.min(N30 - 1, Math.floor(t / B30)), si = Math.min(NS - 1, Math.floor(t / STEP));
+    const cell = (p, v) => `<td class="r ${K.PCLS[p]}">${v}</td>`;
+    const rows = [
+      ['age', p => ageAt(p, t)], ['vill queued (min)', p => prod[p].vil[b]], ['army queued (min)', p => prod[p].mil[b]],
+      ['bldgs placed (min)', p => bld[p].eco[b] + bld[p].mil[b] + bld[p].tech[b]], ['cum villagers', p => cum[p].vil[si]],
+      ['cum army', p => cum[p].army[si]], ['actions/min', p => apm[p][si]], ['units ordered (30s)', p => ord[p][b3]], ['toward enemy (30s)', p => prs[p][b3]],
+    ];
+    document.getElementById('readout').innerHTML = `<table>${rows.map(([l, f]) => `<tr><td class="dim">${l}</td>${cell(1, f(1))}${cell(2, f(2))}</tr>`).join('')}</table>` +
+      `<div style="margin-top:6px"><a class="link" href="map.html#t=${Math.floor(t / 1000)}">[ open ${fmt(t)} on map ▸ ]</a></div>`;
+  }
+  function momentsUI() {
+    const el = document.getElementById('moments');
+    el.innerHTML = MOM.map((m, i) => `<div class="mom" data-t="${m.t}"><span class="t">${String.fromCharCode(65 + i)} ${fmt(m.t)}</span><span class="${K.PCLS[m.who]}">${m.label}</span><a class="link" href="map.html#t=${Math.floor(m.t / 1000)}">map ▸</a></div>`).join('') ||
+      '<div class="dim">no army activity found</div>';
+    el.querySelectorAll('.mom').forEach(d => d.addEventListener('click', ev => { if (ev.target.tagName === 'A') return; S.pin = +d.dataset.t + B30 / 2; draw(); readout(); }));
+  }
+
+  cv.addEventListener('mousemove', e => { const r = cv.getBoundingClientRect(); S.cur = T(e.clientX - r.left); if (S.pin === null) { draw(); readout(); } });
+  cv.addEventListener('mouseleave', () => { S.cur = null; if (S.pin === null) { draw(); readout(); } });
+  cv.addEventListener('click', e => { const r = cv.getBoundingClientRect(); S.pin = S.pin === null ? T(e.clientX - r.left) : null; draw(); readout(); });
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { S.pin = null; draw(); readout(); }
+    else if (e.key === 'm') { const t = S.pin !== null ? S.pin : S.cur; if (t !== null) location.href = `map.html#t=${Math.floor(t / 1000)}`; }
+  });
+  window.addEventListener('resize', layout);
+
+  K.boot(K.bootLines('time flows'), () => {
+    layout(); totals(); momentsUI(); readout();
+    K.status('hover to read values · click to pin', `${NB} min bins · ${N30} × 30s order windows · enemy zone r=${ZONE} tiles`);
+  });
+})();
+</script>
+</body>
+</html>

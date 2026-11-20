@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hawkeye — Map Layers</title>
+<link rel="stylesheet" href="assets/common.css">
+<style>
+  #main { display: grid; grid-template-columns: 1fr 300px; min-height: 0; }
+  #stage { position: relative; min-height: 0; overflow: hidden; }
+  #cv { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #legend { position: absolute; left: 10px; top: 8px; pointer-events: none; font-size: 10px; color: var(--dim); }
+  #legend div { margin-bottom: 2px; }
+  #scrub { border-top: 1px solid var(--border); background: var(--panel); padding: 6px 10px 4px; }
+  #scrub .ctl { display: flex; align-items: center; gap: 12px; }
+  #scrub .clock { font-size: 18px; color: var(--yellow); letter-spacing: .08em; min-width: 78px; }
+  #track { position: relative; flex: 1; height: 22px; }
+  #track input { position: absolute; left: 0; right: 0; top: 0; width: 100%; margin: 0; height: 14px; }
+  #track .tick { position: absolute; top: 14px; width: 1px; height: 6px; }
+  #track .tick span { position: absolute; top: 5px; left: -4px; font-size: 8px; }
+  .layer { display: flex; justify-content: space-between; cursor: pointer; padding: 1px 0; }
+  .layer .k { color: var(--amber); }
+  .layer.off { color: var(--dim); }
+  .layer.off .k { color: var(--dim); }
+  .who { display: flex; justify-content: space-between; border: 1px solid var(--border); background: var(--card); padding: 5px 7px; margin-bottom: 6px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  #hover { min-height: 62px; }
+</style>
+</head>
+<body>
+<div id="shell">
+  <header id="top"></header>
+  <main id="main">
+    <div id="stage">
+      <canvas id="cv"></canvas>
+      <div id="legend"></div>
+    </div>
+    <aside class="panel" id="panel">
+      <section>
+        <h2>Layers</h2>
+        <div id="layers"></div>
+        <div class="row" style="margin-top:6px">
+          <span><button id="bProj">[ iso ]</button> <button id="bMode">[ window ]</button></span>
+          <span><button id="bP1"></button> <button id="bP2"></button></span>
+        </div>
+      </section>
+      <section>
+        <h2>At <span class="val" id="rdT">0:00</span></h2>
+        <div id="readout"></div>
+      </section>
+      <section>
+        <h2>Under cursor</h2>
+        <div id="hover" class="dim">hover the map</div>
+      </section>
+      <section>
+        <h2>Keys</h2>
+        <div class="dim" style="font-size:10px"><kbd>space</kbd> play · <kbd>←/→</kbd> ±10s (<kbd>shift</kbd> ±60s) · <kbd>[ ]</kbd> speed · <kbd>1-7</kbd> layers · <kbd>i</kbd> iso/top · <kbd>w</kbd> window/cumulative · <kbd>k</kbd><kbd>f</kbd> players</div>
+      </section>
+    </aside>
+  </main>
+  <div id="scrub">
+    <div class="ctl">
+      <button id="bPlay">▶</button>
+      <span class="clock" id="clock">0:00</span>
+      <div id="track"><input id="rng" type="range" min="0" value="0" step="1000"></div>
+      <span class="dim">speed</span><button id="bSpeed">60×</button>
+    </div>
+  </div>
+  <footer id="status"></footer>
+</div>
+
+<script src="data/match.js"></script>
+<script src="assets/common.js"></script>
+<script>
+(() => {
+  const { M, COL, PCOL, PN, ME, byP, fmt, upper, ageAt, nextAge, resignOf, winner, tag, ORDER_KINDS, bsize } = K;
+  const DIM = M.dim;
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+  const SPEEDS = [1, 8, 30, 60, 120, 300];
+  const LAYERS = [
+    { id: 'start', name: 'Start objects', on: true },
+    { id: 'build', name: 'Buildings placed', on: true },
+    { id: 'dots', name: 'Order dots (recent)', on: true },
+    { id: 'oheat', name: 'Order heat', on: false },
+    { id: 'cheat', name: 'Camera heat (kaaro)', on: false },
+    { id: 'ctrail', name: 'Camera trail (kaaro)', on: true },
+    { id: 'gather', name: 'Gather points', on: false },
+  ];
+  const S = { t: 0, playing: false, si: 3, iso: true, win: true, winMs: 120000, show: { 1: true, 2: true }, hover: null };
+  const L = {}; LAYERS.forEach(l => { L[l.id] = l.on; });
+
+  K.chrome('Map Layers');
+  document.getElementById('rng').max = M.duration;
+
+  /* ---------- projection (affine tile -> screen) ---------- */
+  let W = 0, H = 0, dpr = 1, A = null;
+  function layout() {
+    const r = cv.parentElement.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1; W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    if (S.iso) {
+      // In-game DE view: tile (0,0) is the LEFT corner. x runs up-right, y runs down-right.
+      // screen_x ∝ x + y, screen_y ∝ y − x  (verified against a live-game frame: kaaro lower-left, opponent right).
+      const s = Math.min(W / (2 * DIM), H / DIM) * 0.94;
+      A = { a: s, b: -s / 2, c: s, d: s / 2, e: (W - 2 * DIM * s) / 2, f: H / 2, s };
+    } else {
+      const s = Math.min(W, H) / DIM * 0.94;
+      A = { a: s, b: 0, c: 0, d: s, e: (W - DIM * s) / 2, f: (H - DIM * s) / 2, s };
+    }
+    terrainCache = null;
+  }
+  const P = (x, y) => [A.a * x + A.c * y + A.e, A.b * x + A.d * y + A.f];
+  function unP(sx, sy) {
+    const det = A.a * A.d - A.b * A.c, X = sx - A.e, Y = sy - A.f;
+    return [(X * A.d - A.c * Y) / det, (A.a * Y - A.b * X) / det];
+  }
+  function quad(cx, cy, size) {           // tile-aligned square centred on (cx,cy)
+    const h = size / 2, p = [P(cx - h, cy - h), P(cx + h, cy - h), P(cx + h, cy + h), P(cx - h, cy + h)];
+    ctx.beginPath(); ctx.moveTo(p[0][0], p[0][1]);
+    for (let i = 1; i < 4; i++) ctx.lineTo(p[i][0], p[i][1]);
+    ctx.closePath();
+  }
+
+  /* ---------- terrain ---------- */
+  let terrainCache = null;
+  const hex = n => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
+  const rgb = (r, g, b) => '#' + hex(r) + hex(g) + hex(b);
+  function tileColor(c, el) {
+    switch (c) {
+      case 1: return rgb(10 + el * 3, 52 + el * 5, 26 + el * 3);      // forest
+      case 2: return rgb(6, 24, 40);                                    // water
+      case 3: return rgb(40, 36, 18);                                   // beach / shallows
+      case 4: return rgb(24 + el * 4, 24 + el * 4, 22 + el * 4);        // other
+      default: return rgb(8 + el * 5, 18 + el * 11, 8 + el * 5);        // grass, shaded by elevation
+    }
+  }
+  function terrainLayer() {
+    if (terrainCache) return terrainCache;
+    const oc = document.createElement('canvas'); oc.width = cv.width; oc.height = cv.height;
+    const o = oc.getContext('2d');
+    o.setTransform(dpr * A.a, dpr * A.b, dpr * A.c, dpr * A.d, dpr * A.e, dpr * A.f);
+    for (let y = 0; y < DIM; y++) for (let x = 0; x < DIM; x++) {
+      const i = y * DIM + x; o.fillStyle = tileColor(M.terrain[i], M.elev[i]); o.fillRect(x, y, 1.05, 1.05);
+    }
+    return (terrainCache = oc);
+  }
+
+  /* ---------- data slices ---------- */
+  const ordersP = { 1: [], 2: [] }, gatherP = { 1: [], 2: [] }, buildsP = { 1: [], 2: [] };
+  [1, 2].forEach(p => byP[p].forEach(e => {
+    if (e.x === undefined) return;
+    if (e.k === 'BUILD') buildsP[p].push(e);
+    else if (e.k === 'GATHER_POINT') gatherP[p].push(e);
+    else if (ORDER_KINDS.has(e.k)) ordersP[p].push(e);
+  }));
+  const view = M.view;
+
+  function range(arr, t) {            // events inside the active time window [lo, t]
+    const hi = upper(arr, t, 't'), lo = S.win ? upper(arr, t - S.winMs, 't') : 0;
+    return [lo, hi];
+  }
+
+  /* ---------- drawing ---------- */
+  function heat(grid, color, max) {
+    ctx.fillStyle = color;
+    for (let i = 0; i < grid.length; i++) {
+      const v = grid[i]; if (!v) continue;
+      ctx.globalAlpha = Math.min(0.85, 0.12 + 0.75 * Math.sqrt(v / max));
+      quad((i % DIM) + 0.5, Math.floor(i / DIM) + 0.5, 1.02); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+  function orderHeat() {
+    const g = { 1: new Float32Array(DIM * DIM), 2: new Float32Array(DIM * DIM) }; let max = 1;
+    [1, 2].forEach(p => {
+      if (!S.show[p]) return;
+      const [lo, hi] = range(ordersP[p], S.t);
+      for (let i = lo; i < hi; i++) {
+        const e = ordersP[p][i], x = Math.floor(e.x), y = Math.floor(e.y);
+        if (x < 0 || y < 0 || x >= DIM || y >= DIM) continue;
+        const v = (g[p][y * DIM + x] += Math.min(e.n || 1, 12)); if (v > max) max = v;
+      }
+    });
+    [1, 2].forEach(p => S.show[p] && heat(g[p], PCOL[p], max));
+  }
+  function cameraHeat() {
+    if (!S.show[ME]) return;
+    const g = new Float32Array(DIM * DIM); let max = 1;
+    const vi =(() => { let lo = 0, h = view.length; while (lo < h) { const m = (lo + h) >> 1; if (view[m][0] <= S.t) lo = m + 1; else h = m; } return lo; })();
+    const vlo = S.win ? (() => { let lo = 0, h = view.length; while (lo < h) { const m = (lo + h) >> 1; if (view[m][0] <= S.t - S.winMs) lo = m + 1; else h = m; } return lo; })() : 0;
+    for (let i = vlo; i < vi; i++) {
+      const next = i + 1 < view.length ? view[i + 1][0] : view[i][0];
+      const w = Math.min(next - view[i][0], 8000) / 1000 + 0.2, cx = Math.floor(view[i][1]), cy = Math.floor(view[i][2]);
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+        const x = cx + dx, y = cy + dy; if (x < 0 || y < 0 || x >= DIM || y >= DIM) continue;
+        const v = (g[y * DIM + x] += w / (1 + Math.abs(dx) + Math.abs(dy))); if (v > max) max = v;
+      }
+    }
+    heat(g, COL.orange, max);
+  }
+  function cameraTrail() {
+    if (!S.show[ME]) return;
+    let hi = 0, h = view.length, lo = 0;
+    while (lo < h) { const m = (lo + h) >> 1; if (view[m][0] <= S.t) lo = m + 1; else h = m; }
+    hi = lo; if (!hi) return;
+    let s = hi - 1; while (s > 0 && view[s][0] > S.t - 90000) s--;
+    ctx.strokeStyle = COL.orange; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.55; ctx.beginPath();
+    for (let i = s; i < hi; i++) { const [x, y] = P(view[i][1], view[i][2]); i === s ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+    ctx.stroke(); ctx.globalAlpha = 1;
+    const [cx, cy] = P(view[hi - 1][1], view[hi - 1][2]);
+    ctx.strokeStyle = COL.yellow; ctx.lineWidth = 1.5; ctx.strokeRect(cx - 7, cy - 7, 14, 14);
+    ctx.beginPath(); ctx.moveTo(cx - 11, cy); ctx.lineTo(cx + 11, cy); ctx.moveTo(cx, cy - 11); ctx.lineTo(cx, cy + 11); ctx.stroke();
+  }
+  function orderDots() {
+    const FADE = 45000;
+    [1, 2].forEach(p => {
+      if (!S.show[p]) return;
+      const arr = ordersP[p], hi = upper(arr, S.t, 't'), lo = upper(arr, S.t - FADE, 't');
+      ctx.fillStyle = PCOL[p]; ctx.strokeStyle = PCOL[p];
+      for (let i = lo; i < hi; i++) {
+        const e = arr[i], age = (S.t - e.t) / FADE, [x, y] = P(e.x, e.y), r = 2 + Math.min(e.n || 1, 24) * 0.22;
+        ctx.globalAlpha = 1 - age; ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fill();
+        if (age < 0.15) { ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(x, y, r + 4, 0, 6.2832); ctx.stroke(); }
+      }
+    });
+    ctx.globalAlpha = 1;
+  }
+  function gatherPts() {
+    [1, 2].forEach(p => {
+      if (!S.show[p]) return;
+      const [lo, hi] = range(gatherP[p], S.t); ctx.strokeStyle = PCOL[p]; ctx.lineWidth = 1; ctx.globalAlpha = 0.8;
+      for (let i = lo; i < hi; i++) { const [x, y] = P(gatherP[p][i].x, gatherP[p][i].y); ctx.beginPath(); ctx.moveTo(x - 3, y - 3); ctx.lineTo(x + 3, y + 3); ctx.moveTo(x + 3, y - 3); ctx.lineTo(x - 3, y + 3); ctx.stroke(); }
+    });
+    ctx.globalAlpha = 1;
+  }
+  function buildings() {
+    [1, 2].forEach(p => {
+      if (!S.show[p]) return;
+      const arr = buildsP[p], hi = upper(arr, S.t, 't');
+      for (let i = 0; i < hi; i++) {
+        const e = arr[i], sz = bsize(e.name), recent = S.t - e.t < 4000;
+        ctx.fillStyle = PCOL[p]; ctx.strokeStyle = PCOL[p]; ctx.lineWidth = 1;
+        if (e.c === 'mil') { ctx.globalAlpha = 0.95; quad(e.x, e.y, sz * 0.92); ctx.fill(); }
+        else if (e.c === 'tech' || e.name === 'Town Center') { ctx.globalAlpha = 1; quad(e.x, e.y, sz * 0.92); ctx.stroke(); ctx.globalAlpha = 0.35; ctx.fill(); }
+        else { ctx.globalAlpha = 0.32; quad(e.x, e.y, sz * 0.9); ctx.fill(); }
+        if (recent) { ctx.globalAlpha = 1; ctx.strokeStyle = COL.yellow; quad(e.x, e.y, sz * 1.5); ctx.stroke(); }
+      }
+    });
+    ctx.globalAlpha = 1;
+  }
+  function starts() {
+    M.players.forEach(pl => {
+      if (!S.show[pl.n]) return;
+      ctx.fillStyle = PCOL[pl.n]; ctx.strokeStyle = PCOL[pl.n];
+      pl.objects.forEach(o => {
+        const [x, y] = P(o.x, o.y);
+        if (o.name === 'Town Center') { ctx.globalAlpha = 1; ctx.lineWidth = 2; quad(o.x, o.y, 3.6); ctx.stroke(); }
+        else { ctx.globalAlpha = 0.7; ctx.fillRect(x - 1.5, y - 1.5, 3, 3); }
+      });
+      const [sx, sy] = P(pl.start[0], pl.start[1]);
+      ctx.globalAlpha = 1; ctx.font = '700 11px "IBM Plex Mono","Courier New",monospace'; ctx.textAlign = 'center';
+      ctx.fillText(`${pl.name} · ${pl.civ}`, sx, sy - 26);
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  function draw() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(terrainLayer(), 0, 0);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (L.cheat) cameraHeat();
+    if (L.oheat) orderHeat();
+    if (L.gather) gatherPts();
+    if (L.build) buildings();
+    if (L.start) starts();
+    if (L.dots) orderDots();
+    if (L.ctrail) cameraTrail();
+    const r = resignOf(2) || M.resign[0];
+    if (r && S.t >= r.t) {
+      ctx.fillStyle = COL.yellow; ctx.font = '700 14px "IBM Plex Mono","Courier New",monospace'; ctx.textAlign = 'center';
+      ctx.fillText(`× ${K.pname(r.p)} resigned · ${K.pname(winner())} wins`, W / 2, H - 14);
+    }
+  }
+
+  /* ---------- panel / readout ---------- */
+  function stats(p, t) {
+    const e = byP[p], hi = upper(e, t, 't'), s = { eco: 0, mil: 0, tech: 0, farms: 0, vil: 0, army: 0, orders: 0, acts: hi };
+    for (let i = 0; i < hi; i++) {
+      const x = e[i];
+      if (x.k === 'BUILD') { if (x.c === 'eco') s.eco++; else if (x.c === 'mil') s.mil++; else if (x.c === 'tech') s.tech++; if (x.name === 'Farm') s.farms++; }
+      else if (x.k === 'DE_QUEUE') { if (x.c === 'vil') s.vil += x.n; else if (x.c === 'mil') s.army += x.n; }
+    }
+    return s;
+  }
+  function readout() {
+    document.getElementById('rdT').textContent = fmt(S.t);
+    let h = '';
+    [1, 2].forEach(p => {
+      const s = stats(p, S.t), na = nextAge(p, S.t);
+      h += `<div class="who"><div><div class="${K.PCLS[p]}"><b>${K.pname(p)}</b></div><div class="dim">${PN[p].civ}</div></div>` +
+        `<div style="text-align:right"><div class="val">${ageAt(p, S.t)}</div><div class="dim">${na ? '▸ ' + na.age + ' ' + fmt(na.t) : 'max age'}</div></div></div>` +
+        `<table><tr><td class="dim">villagers queued</td><td class="r val">${s.vil}</td><td class="dim">army queued</td><td class="r val">${s.army}</td></tr>` +
+        `<tr><td class="dim">eco bldgs</td><td class="r val">${s.eco}</td><td class="dim">mil bldgs</td><td class="r val">${s.mil}</td></tr>` +
+        `<tr><td class="dim">farms</td><td class="r val">${s.farms}</td><td class="dim">actions</td><td class="r val">${s.acts}</td></tr></table><div style="height:6px"></div>`;
+    });
+    document.getElementById('readout').innerHTML = h;
+  }
+  function hoverInfo() {
+    const el = document.getElementById('hover');
+    if (!S.hover) { el.innerHTML = '<span class="dim">hover the map</span>'; return; }
+    const [x, y] = S.hover;
+    if (x < 0 || y < 0 || x >= DIM || y >= DIM) { el.innerHTML = '<span class="dim">off map</span>'; return; }
+    const i = Math.floor(y) * DIM + Math.floor(x), cls = ['grass', 'forest', 'water', 'beach', 'other'][M.terrain[i]];
+    let best = null, bd = 3.2;
+    [1, 2].forEach(p => buildsP[p].forEach(e => { if (e.t > S.t) return; const d = Math.hypot(e.x - x, e.y - y); if (d < bd) { bd = d; best = e; } }));
+    el.innerHTML = `<div><span class="lbl">tile</span> <span class="val">${Math.floor(x)},${Math.floor(y)}</span> <span class="dim">· ${cls} · elev ${M.elev[i]}</span></div>` +
+      (best ? `<div><span class="lbl">nearest</span> ${tag(best.p)} <span class="val">${best.name}</span> <span class="dim">@ ${fmt(best.t)}</span></div>` : '<div class="dim">no building nearby</div>');
+  }
+  function legend() {
+    document.getElementById('legend').innerHTML =
+      `<div>${tag(1)} ■ eco ░ · ■ military █ · ▢ tech/TC</div><div>${tag(2)} same marks · yellow ring = placed &lt; 4s ago</div>` +
+      `<div>${S.iso ? 'isometric (in-game view)' : 'top-down'} · ${S.win ? 'window ' + (S.winMs / 1000) + 's' : 'cumulative'} · speed ${SPEEDS[S.si]}×</div>`;
+  }
+  function layersUI() {
+    const box = document.getElementById('layers'); box.innerHTML = '';
+    LAYERS.forEach((l, i) => {
+      const d = document.createElement('div'); d.className = 'layer' + (L[l.id] ? '' : ' off');
+      d.innerHTML = `<span><span class="k">${i + 1}</span> ${l.name}</span><span>${L[l.id] ? '[x]' : '[ ]'}</span>`;
+      d.onclick = () => { L[l.id] = !L[l.id]; layersUI(); };
+      box.appendChild(d);
+    });
+    document.getElementById('bProj').textContent = S.iso ? '[ iso ]' : '[ top ]';
+    document.getElementById('bMode').textContent = S.win ? '[ window ]' : '[ cumulative ]';
+    [1, 2].forEach(p => { const b = document.getElementById('bP' + p); b.textContent = (S.show[p] ? '[x] ' : '[ ] ') + K.pname(p); b.style.color = S.show[p] ? PCOL[p] : COL.dim; });
+    legend();
+  }
+
+  /* ---------- time ---------- */
+  const rng = document.getElementById('rng');
+  function setT(t) { S.t = Math.max(0, Math.min(M.duration, t)); rng.value = S.t; }
+  let last = 0;
+  function frame(ts) {
+    const dt = last ? ts - last : 0; last = ts;
+    if (S.playing) { setT(S.t + dt * SPEEDS[S.si]); if (S.t >= M.duration) play(false); }
+    draw(); readout();
+    document.getElementById('clock').textContent = fmt(S.t);
+    K.status(S.playing ? '▶ playing' : '❚❚ paused', `${fmt(S.t)} / ${fmt(M.duration)} · ${SPEEDS[S.si]}× · ${M.players.map(p => p.name).join(' vs ')}`);
+    requestAnimationFrame(frame);
+  }
+  function play(on) { S.playing = on; document.getElementById('bPlay').textContent = on ? '❚❚' : '▶'; if (on && S.t >= M.duration) setT(0); }
+  function ticks() {
+    const tr = document.getElementById('track');
+    M.ages.forEach(a => {
+      const d = document.createElement('div'); d.className = 'tick'; d.style.left = (a.t / M.duration * 100) + '%'; d.style.background = PCOL[a.p];
+      d.innerHTML = `<span style="color:${PCOL[a.p]}">${a.age[0]}</span>`; d.title = `${K.pname(a.p)} → ${a.age} ${fmt(a.t)}`; tr.appendChild(d);
+    });
+  }
+
+  /* ---------- wiring ---------- */
+  rng.oninput = () => setT(+rng.value);
+  document.getElementById('bPlay').onclick = () => play(!S.playing);
+  document.getElementById('bSpeed').onclick = () => { S.si = (S.si + 1) % SPEEDS.length; document.getElementById('bSpeed').textContent = SPEEDS[S.si] + '×'; legend(); };
+  document.getElementById('bProj').onclick = () => { S.iso = !S.iso; layout(); layersUI(); };
+  document.getElementById('bMode').onclick = () => { S.win = !S.win; layersUI(); };
+  [1, 2].forEach(p => document.getElementById('bP' + p).onclick = () => { S.show[p] = !S.show[p]; layersUI(); });
+  cv.addEventListener('mousemove', e => { const r = cv.getBoundingClientRect(); S.hover = unP(e.clientX - r.left, e.clientY - r.top); hoverInfo(); });
+  cv.addEventListener('mouseleave', () => { S.hover = null; hoverInfo(); });
+  window.addEventListener('resize', layout);
+  window.addEventListener('keydown', e => {
+    const k = e.key;
+    if (k === ' ') { play(!S.playing); e.preventDefault(); }
+    else if (k === 'ArrowRight') setT(S.t + (e.shiftKey ? 60000 : 10000));
+    else if (k === 'ArrowLeft') setT(S.t - (e.shiftKey ? 60000 : 10000));
+    else if (k === ']') { S.si = Math.min(SPEEDS.length - 1, S.si + 1); document.getElementById('bSpeed').textContent = SPEEDS[S.si] + '×'; }
+    else if (k === '[') { S.si = Math.max(0, S.si - 1); document.getElementById('bSpeed').textContent = SPEEDS[S.si] + '×'; }
+    else if (k >= '1' && k <= String(LAYERS.length)) { const l = LAYERS[+k - 1]; L[l.id] = !L[l.id]; layersUI(); }
+    else if (k === 'i') { S.iso = !S.iso; layout(); layersUI(); }
+    else if (k === 'w') { S.win = !S.win; layersUI(); }
+    else if (k === 'k') { S.show[1] = !S.show[1]; layersUI(); }
+    else if (k === 'f') { S.show[2] = !S.show[2]; layersUI(); }
+  });
+
+  K.boot(K.bootLines('map layers'), () => {
+    const hp = new URLSearchParams(location.hash.slice(1));            // #t=1500&l=oheat,build&v=top&m=cum
+    if (hp.has('l')) { const on = hp.get('l').split(','); LAYERS.forEach(l => { L[l.id] = on.includes(l.id); }); }
+    if (hp.get('v') === 'top') S.iso = false;
+    if (hp.get('m') === 'cum') S.win = false;
+    layout(); layersUI(); ticks();
+    const h = K.hashT(); setT(h !== null ? h : M.duration * 0.5);
+    requestAnimationFrame(frame);
+  });
+})();
+</script>
+</body>
+</html>

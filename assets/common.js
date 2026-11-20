@@ -1,6 +1,10 @@
 /* Shared helpers for the hawkeye pages. Exposes window.K. Data: window.MATCH (data/match.js). */
 (function () {
   const M = window.MATCH;
+  if (!M) {
+    document.body.innerHTML = '<pre style="color:#ff6600;padding:24px;font:12px monospace">◈ HAWKEYE\n\n&gt; no match data (data/match.js missing).\n&gt; run: venv\\Scripts\\python tools\\analyze.py</pre>';
+    throw new Error('MATCH data missing');
+  }
   const COL = { bg: '#000000', panel: '#080800', card: '#101008', border: '#1e1e00', orange: '#ff6600',
     amber: '#ffaa00', yellow: '#e8e000', cyan: '#00cccc', green: '#00ff88', dim: '#445544', text: '#ccccaa' };
   const PCOL = { 1: COL.orange, 2: COL.cyan };

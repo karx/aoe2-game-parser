@@ -1,0 +1,46 @@
+name: Deploy Hawkeye to GitHub Pages
+
+# Publishes ONLY the static site (pages, assets, data, docs). Tools, skill, patches and replays stay out.
+# One-time repo setting: Settings > Pages > Build and deployment > Source = "GitHub Actions".
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'index.html'
+      - 'map.html'
+      - 'flows.html'
+      - 'assets/**'
+      - 'data/**'
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble site
+        run: |
+          mkdir _site
+          cp index.html map.html flows.html .nojekyll _site/
+          cp -r assets data docs _site/
+          test -f _site/data/match.js || { echo "data/match.js missing — run tools/analyze.py and commit it"; exit 1; }
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

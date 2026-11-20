@@ -64,3 +64,15 @@ td.r, th.r { text-align: right; }
 @keyframes blink { 50% { opacity: 0; } }
 
 kbd { color: var(--amber); font: inherit; }
+
+/* narrow screens: stack the side panel under the main view and let the page scroll */
+@media (max-width: 820px) {
+  html, body { overflow: auto; }
+  #shell { height: auto; min-height: 100vh; }
+  #main { grid-template-columns: 1fr !important; }
+  #stage { height: 62vh; }
+  #chartwrap { max-height: none; overflow: visible; }
+  .panel { border-left: 0; border-top: 1px solid var(--border); }
+  #top { overflow-x: auto; }
+  #top .crumb { display: none; }
+}

@@ -74,7 +74,7 @@ def extract(path):
         players.append(dict(
             n=p['number'], name=dec(p['name']), civ=name_of(CIV, d.get('civilization_id')),
             start=[p['position']['x'], p['position']['y']],
-            team=d.get('team_id'), profile=d.get('profile_id'),
+            team=d.get('team_id'),                      # profile ids deliberately dropped (privacy; pages don't use them)
             objects=[dict(name=name_of(OBJ, o['object_id']), x=o['position']['x'], y=o['position']['y'])
                      for o in p['objects']]))
 
